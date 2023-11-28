@@ -98,10 +98,17 @@ runs:
       with:
         github-token: ${{ inputs.github_token }}
         script: |
+          const pattern = new RegExp([
+            `[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)`,
+            `(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))`
+          ].join(`|`), `g`)
+          
+          const plan = `${{ steps.plan.outputs.stdout }}`.replace(pattern, ``)
+          
           const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            run_id: context.runId
+            run_id: context.runId,
             attempt_number: process.env.GITHUB_RUN_ATTEMPT
           })
 
@@ -109,8 +116,16 @@ runs:
           #### Initialization ⚙️\`${{ steps.init.outcome }}\`
           #### Validation 🤖\`${{ steps.validate.outcome }}\`
           #### Plan 📖\`${{ steps.plan.outcome }}\`
+          
+          ${(`${{ steps.plan.outcome }}` === `success`) ? `<details><summary>Show Plan</summary>
 
-          **Pusher**: *@${context.actor}*, **Commit**: *\`${context.payload.pull_request.head.sha.substring(0, 7)}\`*, **Workflow run**: *[${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT})*, **Workflow job**: *[${context.job}](${jobs.jobs.filter(job => job.name == context.job)[0].html_url})*`
+          \`\`\`
+          ${plan}
+          \`\`\`
+          
+          </details>` : `` }
+          
+          **Pusher**: *@${context.actor}* &nbsp; **Commit**: *\`${context.payload.pull_request.head.sha.substring(0, 7)}\`* &nbsp; **Workflow run**: *[${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT})* &nbsp; **Workflow job**: *[${context.job}](${jobs.jobs.filter(job => job.name == context.job)[0].html_url})*`
           
           github.rest.issues.createComment({
             issue_number: context.issue.number,

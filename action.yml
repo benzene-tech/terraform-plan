@@ -40,9 +40,16 @@ outputs:
   plan_stdout:
     description: Terraform plan output
     value: ${{ steps.plan.outputs.stdout }}
+  cache_path:
+    description: Path to restore tfplan file
+    value: ${{ inputs.working_directory }}/tfplan
+  cache_key:
+    description: Key to restore tfplan file
+    value: ${{ github.workflow }}-${{ github.run_id }}
 
 runs:
   using: composite
+
   steps:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
@@ -89,8 +96,14 @@ runs:
       shell: bash
       run: |
         echo ::group::Plan
-        terraform plan ${{ inputs.plan_flags }}
+        terraform plan -out=tfplan ${{ inputs.plan_flags }}
         echo ::endgroup::
+
+    - name: Cache Plan file
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.working_directory }}/tfplan
+        key: ${{ github.workflow }}-${{ github.run_id }}
 
     - name: Comment in PR
       if: github.event_name == 'pull_request' && always()

@@ -40,6 +40,9 @@ outputs:
   plan_stdout:
     description: Terraform plan output
     value: ${{ steps.plan.outputs.stdout }}
+  exit_code:
+    description: Terraform plan exit code
+    value: ${{ steps.plan.outputs.exitcode }}
   cache_path:
     description: Path to restore tfplan file
     value: ${{ inputs.working_directory }}/tfplan
@@ -93,6 +96,7 @@ runs:
       env:
         TF_IN_AUTOMATION: "1"
         TF_INPUT: "0"
+        TF_CLI_ARGS_plan: "-detailed-exitcode"
       shell: bash
       run: |
         echo ::group::Plan
@@ -111,6 +115,17 @@ runs:
       with:
         github-token: ${{ inputs.github_token }}
         script: |
+          // 1. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+          })
+          
+          // 2. Prepare format of the comment
           const pattern = new RegExp([
             `[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)`,
             `(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))`
@@ -140,9 +155,20 @@ runs:
           
           **Pusher**: *@${context.actor}* &nbsp; **Commit**: *\`${context.payload.pull_request.head.sha.substring(0, 7)}\`* &nbsp; **Workflow run**: *[${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT})* &nbsp; **Workflow job**: *[${context.job}](${jobs.jobs.filter(job => job.name == context.job)[0].html_url})*`
           
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: output
-          })
+          // 3. If we have a comment, update it, otherwise create a new one
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } 
+          else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }

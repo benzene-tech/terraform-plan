@@ -2,86 +2,71 @@ name: Terraform Plan
 description: Validate and Plan terraform configurations
 
 inputs:
-  github_token:
+  plan-flags:
+    description: Extra flags for Terraform Plan
+    required: false
+  init:
+    description: Toggle to run init
+    required: false
+    default: 'true'
+  init-flags:
+    description: Extra flags for Terraform Init
+    required: false
+  apply:
+    description: Toggle to run apply
+    required: false
+    default: 'false'
+  apply-flags:
+    description: Extra flags for Terraform Apply
+    required: false
+  working-directory:
+    description: The directory where the terraform files are located
+    required: false
+  github-token:
     description: GitHub token used to create comment in PR
     required: false
     default: ${{ github.token }}
-  working_directory:
-    description: The directory where the terraform files are located
-    required: false
-  terraform_cloud_hostname:
-    description: The hostname of a Terraform Cloud/Enterprise instance to place within the credentials block of the Terraform CLI configuration file
-    required: false
-    default: app.terraform.io
-  terraform_cloud_token:
-    description: The API token for a Terraform Cloud/Enterprise instance to place within the credentials block of the Terraform CLI configuration file
-    required: false
-  terraform_version:
-    description: The version of Terraform CLI to install. Instead of full version string you can also specify constraint string starting with "<" (for example `<1.13.0`) to install the latest version satisfying the constraint. A value of `latest` will install the latest version of Terraform CLI
-    required: false
-    default: latest
-  init_flags:
-    description: Extra flags for Terraform Init
-    required: false
-  skip_init:
-    description: Toggle to skip init step
-    required: false
-    default: "false"
-  plan_flags:
-    description: Extra flags for Terraform Plan
-    required: false
+
 outputs:
-  init_stdout:
-    description: Terraform init output
-    value: ${{ steps.init.outputs.stdout }}
-  validate_stdout:
-    description: Terraform validate output
-    value: ${{ steps.validate.outputs.stdout }}
-  plan_stdout:
-    description: Terraform plan output
-    value: ${{ steps.plan.outputs.stdout }}
-  exit_code:
-    description: Terraform plan exit code
+  exit-code:
+    description: Plan exit code
     value: ${{ steps.plan.outputs.exitcode }}
-  cache_path:
-    description: Path to restore tfplan file
-    value: ${{ inputs.working_directory }}/tfplan
-  cache_key:
-    description: Key to restore tfplan file
-    value: ${{ github.workflow }}-${{ github.run_id }}
+  plan-file:
+    description: Path to plan file
+    value: ${{ inputs.working-directory }}/tfplan
 
 runs:
   using: composite
 
   steps:
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        cli_config_credentials_hostname: ${{ inputs.terraform_cloud_hostname }}
-        cli_config_credentials_token: ${{ inputs.terraform_cloud_token }}
-        terraform_version: ${{ inputs.terraform_version }}
-
     - name: Check format
       id: format
       shell: bash
       run: terraform fmt -recursive -check
 
+    - name: Cache Providers
+      id: cache
+      uses: actions/cache@v4
+      with:
+        key: terraform-plan-${{ github.workflow }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+        path: ${{ inputs.working-directory }}/.terraform/providers
+
     - name: Init
       id: init
-      if: inputs.skip_init != 'true'
-      working-directory: ${{ inputs.working_directory }}
+      if: fromJSON(inputs.init)
+      working-directory: ${{ inputs.working-directory }}
       env:
         TF_IN_AUTOMATION: "1"
         TF_INPUT: "0"
       shell: bash
       run: |
         echo ::group::Init
-        terraform init ${{ inputs.init_flags }}
+        terraform init ${{ inputs.init-flags }}
         echo ::endgroup::
 
     - name: Validate
       id: validate
-      working-directory: ${{ inputs.working_directory }}
+      working-directory: ${{ inputs.working-directory }}
       env:
         TF_IN_AUTOMATION: "1"
       shell: bash
@@ -90,82 +75,104 @@ runs:
         terraform validate
         echo ::endgroup::
 
+    - name: Cache Plan file
+      id: cache
+      uses: actions/cache@v4
+      with:
+        key: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.working-directory }}/tfplan
+
     - name: Plan
       id: plan
-      working-directory: ${{ inputs.working_directory }}
+      working-directory: ${{ inputs.working-directory }}
+      if: steps.cache.outputs.cache-hit == 'false'
       env:
         TF_IN_AUTOMATION: "1"
         TF_INPUT: "0"
-        TF_CLI_ARGS_plan: "-detailed-exitcode"
       shell: bash
       run: |
         echo ::group::Plan
-        terraform plan -out=tfplan ${{ inputs.plan_flags }}
+        terraform plan -detailed-exitcode -out=tfplan ${{ inputs.plan-flags }}
         echo ::endgroup::
 
-    - name: Cache Plan file
-      uses: actions/cache/save@v4
-      with:
-        path: ${{ inputs.working_directory }}/tfplan
-        key: ${{ github.workflow }}-${{ github.run_id }}
+    - name: Apply
+      working-directory: ${{ inputs.working-directory }}
+      if: fromJSON(inputs.apply) && steps.plan.outputs.exitcode != '0'
+      env:
+        TF_IN_AUTOMATION: "1"
+        TF_INPUT: "0"
+      shell: bash
+      run: |
+        echo ::group::Apply
+        terraform apply ${{ inputs.apply-flags }} tfplan
+        echo ::endgroup::
 
     - name: Comment in PR
-      if: github.event_name == 'pull_request' && always()
+      if: ${{ !cancelled() && github.event_name == 'pull_request' }}
       uses: actions/github-script@v6
       with:
-        github-token: ${{ inputs.github_token }}
+        github-token: ${{ inputs.github-token }}
         script: |
-          // 1. Retrieve existing bot comments for the PR
-          const { data: comments } = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-          })
-          const botComment = comments.find(comment => {
-            return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
-          })
+          let plan = ''
+          if ('${{ steps.plan.outcome }}' === 'success') {
+            await exec.exec('terraform show', ['-no-color', tfplan], {
+              cwd: '${{ inputs.working-directory }}',
+              silent: true,
+              env: {
+                TF_IN_AUTOMATION: '1'
+              },
+              listeners: {
+                stdout: (data: Buffer) => {
+                  plan += data.toString()
+                }
+              }
+            })
+          }
           
-          // 2. Prepare format of the comment
-          const pattern = new RegExp([
-            `[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)`,
-            `(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))`
-          ].join(`|`), `g`)
           
-          const plan = `${{ steps.plan.outputs.stdout }}`.replace(pattern, ``)
-          
+          // 1. Prepare the format of the comment
           const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
             owner: context.repo.owner,
             repo: context.repo.repo,
             run_id: context.runId,
             attempt_number: process.env.GITHUB_RUN_ATTEMPT
           })
-
+          
           const output = `#### Format 🖌\`${{ steps.format.outcome }}\`
           #### Initialization ⚙️\`${{ steps.init.outcome }}\`
           #### Validation 🤖\`${{ steps.validate.outcome }}\`
           #### Plan 📖\`${{ steps.plan.outcome }}\`
           
-          ${(`${{ steps.plan.outcome }}` === `success`) ? `<details><summary>Show Plan</summary>
-
+          ${plan.trim() !== '' ? `<details><summary>Show Plan</summary>
+          \`\`\`diff
+          ${plan.trim()}
           \`\`\`
-          ${plan}
-          \`\`\`
-          
-          </details>` : `` }
+          </details>` : ''}
           
           **Pusher**: *@${context.actor}* &nbsp; **Commit**: *\`${context.payload.pull_request.head.sha.substring(0, 7)}\`* &nbsp; **Workflow run**: *[${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT})* &nbsp; **Workflow job**: *[${context.job}](${jobs.jobs.filter(job => job.name == context.job)[0].html_url})*`
           
+          
+          // 2. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('Format')
+          })
+          
+          
           // 3. If we have a comment, update it, otherwise create a new one
           if (botComment) {
-            github.rest.issues.updateComment({
+            await github.rest.issues.updateComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               comment_id: botComment.id,
               body: output
             })
-          } 
-          else {
-            github.rest.issues.createComment({
+          } else {
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
